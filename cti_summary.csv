@@ -1,0 +1,11 @@
+Model,CTI (%)
+MobilenetV2_Rice_model.pth,42.40
+ResNet18_Weights_Strawberry.pth,41.29
+Mobilenetv2_cauliflower.pth,40.42
+HybridMaizemodel.pth,40.09
+Squeez_suffle_cardamom_Hybrid.pth,39.83
+hybrid_sesame.pth,39.25
+Hybrid_Onion_model.pth,36.81
+squeezenet_Rajma_ND.pth,35.68
+Hybridmungbean.pth,33.38
+Hybrid_chilli.pth,31.34

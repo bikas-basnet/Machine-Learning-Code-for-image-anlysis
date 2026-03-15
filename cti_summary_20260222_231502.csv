@@ -1,0 +1,20 @@
+Model,CTI (%),,,,,,Source \ Target,cauliflower,Citrus,large_cardamom,mung_bean,rice,strawberry,chili,kidney_bean,maize,onion,sesame
+HybridMaizemodel.pth,45.11,,,,,,cauliflower,—,261.91,266.07,214.3,321.35,198.02,251.98,246.13,250.19,291.79,225.74
+ResNet18_Weights_Strawberry.pth,44.61,,,,,,Citrus,261.91,—,209.62,169.68,333.23,164.22,227.3,184.43,283.79,305.21,216.43
+squeezenet_Rajma_ND.pth,42.99,,,,,,large_cardamom,266.07,209.62,—,224.54,249.44,214.54,245.07,269.01,180.5,246.56,221.09
+Mobilenet_v2_Citrus.pth,41.05,,,,,,mung_bean,214.3,169.68,224.54,—,337.37,117.65,239.56,110.1,283.09,312.55,157.63
+Squeez_suffle_cardamom_Hybrid.pth,39.65,,,,,,rice,321.35,333.23,249.44,337.37,—,276.01,303.09,363.8,215.08,181.09,246.67
+Sufflenet_v2_strwaberry.pth,39.61,,,,,,strawberry,198.02,164.22,214.54,117.65,276.01,—,219.17,143.47,266.8,268.5,140.07
+v2plantnet_state_dict.pth,39.29,,,,,,chili,251.98,227.3,245.07,239.56,303.09,219.17,—,263.86,243.67,251.29,237.85
+ConvNeXt_V2_Atto_best.pth,39.08,,,,,,kidney_bean,246.13,184.43,269.01,110.1,363.8,143.47,263.86,—,332.09,338.51,169.15
+MobilenetV2_Rice_model.pth,38.98,,,,,,maize,250.19,283.79,180.5,283.09,215.08,266.8,243.67,332.09,—,219.45,247.86
+Mobilenetv2_cauliflower.pth,37.64,,,,,,onion,291.79,305.21,246.56,312.55,181.09,268.5,251.29,338.51,219.45,—,247.96
+Hybridmungbean.pth,37.15,,,,,,sesame,225.74,216.43,221.09,157.63,246.67,140.07,237.85,169.15,247.86,247.96,—
+hybrid_sesame.pth,35.71,,,,,,,,,,,,,,,,,
+Efficienet_net_V2model_Strawberry.pth,33.79,,,,,,,,,,,,,,,,,
+Hybrid_chilli.pth,33.09,,,,,,,,,,,,,,,,,
+Hybrid_Onion_model.pth,30.7,,,,,,,,Metric,Value,,,,,,,,
+,,,,,,,,,Number of cross-crop pairs,110,,,,,,,,
+,,,,,,,,,Average FID,240.1,,,,,,,,
+,,,,,,,,,Minimum FID,110.1,,,,,,,,
+,,,,,,,,,Maximum FID,363.8,,,,,,,,
