@@ -1,0 +1,314 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, models, transforms
+from torch.utils.data import DataLoader
+import copy
+import time
+
+from sklearn.metrics import precision_recall_fscore_support
+
+# =============================================================================
+# DEVICE
+# =============================================================================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# =============================================================================
+# DATASET PATH
+# =============================================================================
+crop_name = "/content/drive/MyDrive/Colab Notebooks/KT"
+train_path = f"{crop_name}/Train"
+test_path = f"{crop_name}/Test"
+
+# =============================================================================
+# TRANSFORMS (IMPROVED)
+# =============================================================================
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+    transforms.RandomRotation(20),
+    transforms.RandomHorizontalFlip(),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+test_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+# =============================================================================
+# DATA LOADER
+# =============================================================================
+train_dataset = datasets.ImageFolder(train_path, transform=train_transform)
+test_dataset = datasets.ImageFolder(test_path, transform=test_transform)
+
+train_loader = DataLoader(train_dataset, batch_size=20, shuffle=True, num_workers=2)
+test_loader = DataLoader(test_dataset, batch_size=20, shuffle=False, num_workers=2)
+
+num_classes = len(train_dataset.classes)
+
+print("Classes:", train_dataset.classes)
+print("Train samples:", len(train_dataset))
+print("Test samples:", len(test_dataset))
+
+# =============================================================================
+# ATTENTION MODULES
+# =============================================================================
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels // reduction, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        return x * self.fc(x)
+
+class CBAMLite(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.channel = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels // reduction, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1),
+            nn.Sigmoid()
+        )
+        self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3)
+
+    def forward(self, x):
+        x = x * self.channel(x)
+        avg = torch.mean(x, dim=1, keepdim=True)
+        mx, _ = torch.max(x, dim=1, keepdim=True)
+        x = x * torch.sigmoid(self.spatial(torch.cat([avg, mx], dim=1)))
+        return x
+
+class CoordAtt(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        mid_channels = max(8, channels // reduction)
+
+        self.conv1 = nn.Conv2d(channels, mid_channels, 1)
+        self.bn1 = nn.BatchNorm2d(mid_channels)
+        self.act = nn.ReLU(inplace=True)
+
+        self.conv_h = nn.Conv2d(mid_channels, channels, 1)
+        self.conv_w = nn.Conv2d(mid_channels, channels, 1)
+
+    def forward(self, x):
+        identity = x
+        b, c, h, w = x.size()
+
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0,1,3,2)
+
+        y = torch.cat([x_h, x_w], dim=2)
+        y = self.act(self.bn1(self.conv1(y)))
+
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0,1,3,2)
+
+        a_h = torch.sigmoid(self.conv_h(x_h))
+        a_w = torch.sigmoid(self.conv_w(x_w))
+
+        return identity * a_h * a_w
+
+# =============================================================================
+# MODEL
+# =============================================================================
+class HybridShuffleNetSqueezeNet(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+
+        shufflenet = models.shufflenet_v2_x1_0(weights='IMAGENET1K_V1')
+        squeezenet = models.squeezenet1_1(weights='IMAGENET1K_V1')
+
+        self.shufflenet_features = nn.Sequential(
+            shufflenet.conv1,
+            shufflenet.maxpool,
+            shufflenet.stage2,
+            shufflenet.stage3
+        )
+
+        self.main_path = nn.Sequential(
+            nn.Conv2d(232, 256, 1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            SEBlock(256),
+            nn.AdaptiveAvgPool2d((13, 13))
+        )
+
+        self.adapter_path = nn.Sequential(
+            nn.Conv2d(232, 256, 1, bias=False),
+            nn.Upsample(size=(13, 13), mode='bilinear', align_corners=False)
+        )
+
+        self.squeezenet_tail = nn.Sequential(
+            *list(squeezenet.features)[8:]
+        )
+
+        self.cbam_lite = CBAMLite(512)
+        self.coord_att = CoordAtt(512)
+
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+
+        # Partial freeze
+        for name, param in self.shufflenet_features.named_parameters():
+            if "stage3" not in name:
+                param.requires_grad = False
+
+        # Unfreeze SqueezeNet tail
+        for param in self.squeezenet_tail.parameters():
+            param.requires_grad = True
+
+    def forward(self, x):
+        feat = self.shufflenet_features(x)
+
+        main = self.main_path(feat)
+        adapter = self.adapter_path(feat)
+
+        x = main + adapter
+        x = self.squeezenet_tail(x)
+
+        x = self.cbam_lite(x)
+        x = self.coord_att(x)
+
+        x = self.global_pool(x)
+        x = self.classifier(x)
+
+        return x
+
+# =============================================================================
+# EVALUATION FUNCTION
+# =============================================================================
+def evaluate(model, loader):
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for data, target in loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            pred = output.argmax(1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+
+    return correct / total
+
+# =============================================================================
+# TRAINING SETUP
+# =============================================================================
+model = HybridShuffleNetSqueezeNet(num_classes).to(device)
+
+optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+criterion = nn.CrossEntropyLoss()
+
+# =============================================================================
+# TRAINING LOOP
+# =============================================================================
+# Training loop
+num_epochs = 20
+best_model_wts = copy.deepcopy(model.state_dict())
+best_acc = 0.0
+best_f1 = 0.0
+
+# Lists to store metrics for plotting
+train_losses, test_losses = [], []
+train_accuracies, test_accuracies = [], []
+train_f1_scores, test_f1_scores = [], []
+
+for epoch in range(num_epochs):
+    start_time = time.time()
+
+    # Training
+    model.train()
+    running_loss = 0.0
+    running_corrects = 0
+    y_true_train, y_pred_train = [], []
+
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        _, preds = torch.max(outputs, 1)
+        running_loss += loss.item() * inputs.size(0)
+        running_corrects += torch.sum(preds == labels.data)
+        y_true_train.extend(labels.cpu().numpy())
+        y_pred_train.extend(preds.cpu().numpy())
+
+    train_loss = running_loss / len(train_dataset)
+    train_acc = running_corrects.double() / len(train_dataset)
+    train_f1 = precision_recall_fscore_support(y_true_train, y_pred_train, average='weighted')[2]
+
+    # Evaluation
+    model.eval()
+    test_loss = 0.0
+    test_corrects = 0
+    y_true, y_pred, y_scores = [], [], []
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            _, preds = torch.max(outputs, 1)
+            test_loss += loss.item() * inputs.size(0)
+            test_corrects += torch.sum(preds == labels.data)
+
+            y_true.extend(labels.cpu().numpy())
+            y_pred.extend(preds.cpu().numpy())
+            y_scores.extend(torch.softmax(outputs, dim=1).cpu().numpy())
+
+    test_loss = test_loss / len(test_dataset)
+    test_acc = test_corrects.double() / len(test_dataset)
+    test_f1 = precision_recall_fscore_support(y_true, y_pred, average='weighted')[2]
+
+    # Save metrics
+    train_losses.append(train_loss)
+    test_losses.append(test_loss)
+    train_accuracies.append(train_acc.item())
+    test_accuracies.append(test_acc.item())
+    train_f1_scores.append(train_f1)
+    test_f1_scores.append(test_f1)
+
+    # Save best model based on F1 score
+    if test_f1 > best_f1:
+        best_f1 = test_f1
+        best_acc = test_acc
+        hybrid_suffle_squeez_paradd = copy.deepcopy(model.state_dict())
+
+    # Step scheduler
+    scheduler.step()
+
+    epoch_time = time.time() - start_time
+    print(f"\nEpoch {epoch+1}/{num_epochs}")
+    print(f"🟢 Train - Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}, F1: {train_f1:.4f}")
+    print(f"🔵 Test  - Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}, F1: {test_f1:.4f}")
+    print(f"⏱️ Time: {epoch_time:.2f} sec")
